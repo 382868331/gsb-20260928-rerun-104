@@ -27,6 +27,37 @@
 
 `RuleSet` 在发布时不可变；调用方可先通过 `ActiveSet()` 固定一个快照，再执行 `Evaluate`，确保一次判断始终使用同一个版本。`Engine` 的判断和换版可并发调用。
 
+## 影响预演
+
+发布候选规则前，可以把人工保存的真实请求同时回放到旧版和候选版：
+
+```go
+engine.SaveRequest(policy.SavedRequest{
+	ID:          "vip-risk-review",
+	Description: "人工复核过的 VIP 请求",
+	Attributes:  map[string]any{"tier": "vip", "risk": 15},
+})
+
+preview, err := engine.PreviewCandidate(candidateRules)
+if err != nil {
+	// 候选规则校验失败；当前版本和正在执行的请求均不受影响。
+	return err
+}
+for _, change := range preview.RequestChanges {
+	// change.Old / change.New 包含完整决策与每条规则的 matched、failed、unknown 轨迹。
+	// change.Reasons 标明变化来自原子条件、ref 复用的条件、优先级、同优先级公开顺序或 effect。
+	_ = change
+}
+```
+
+也可以直接使用 `PreviewRules(candidateRules, requests)` 临时传入请求。预演会先完整编译候选 `RuleSet`，编译失败不会替换当前版本；预演返回的候选集也是独立不可变快照。
+
+缺失属性始终记录为 `unknown`，不会为了比较方便归类为 `false` 或默认允许。同优先级规则只调整公开顺序时，报告会保留 `public_order` 原因；对那些相关规则仍为 `unknown` 的请求，`Changed` 仍为 false，避免把元数据重排误报为决策影响。
+
+## 发布历史与撤回
+
+`WithdrawLastPublish()` 会恢复发布前活动的规则集，并向历史追加一条 `withdrawn` 记录；原来的发布记录不会删除，可通过 `History()` 审计。撤回后再次发布会获得新的版本号，不覆盖历史版本。
+
 ## 使用示例
 
 ```go
