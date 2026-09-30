@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -93,17 +94,19 @@ type RuleSet struct {
 // Engine is safe for concurrent evaluations and rule-set replacement.
 type Engine struct {
 	current atomic.Pointer[RuleSet]
+	mu      sync.Mutex
+	history []ReleaseRecord
 }
 
 // NewEngine creates an engine. rules are validated before becoming active.
 func NewEngine(rules []Rule) (*Engine, error) {
-	set, err := CompileRules(1, rules)
+	e := &Engine{}
+	set, err := CompileRules(e.nextVersionLocked(), rules)
 	if err != nil {
 		return nil, err
 	}
-	engine := &Engine{}
-	engine.current.Store(set)
-	return engine, nil
+	e.recordLocked(ReleaseActionPublish, nil, set, "initial publish")
+	return e, nil
 }
 
 // NewEngineFromSet embeds an already compiled immutable rule set.
@@ -130,13 +133,8 @@ func (e *Engine) ActiveSet() *RuleSet {
 // ReplaceRules validates the complete replacement batch and switches only on success.
 // On any validation error the previous active version remains unchanged.
 func (e *Engine) ReplaceRules(rules []Rule) error {
-	nextVersion := e.Version() + 1
-	set, err := CompileRules(nextVersion, rules)
-	if err != nil {
-		return err
-	}
-	e.current.Store(set)
-	return nil
+	_, err := e.PublishRules(rules)
+	return err
 }
 
 // LoadSet atomically replaces the active set with a separately compiled set.
