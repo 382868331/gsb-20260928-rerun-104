@@ -8,6 +8,7 @@ type ReleaseAction string
 const (
 	ReleaseActionPublish  ReleaseAction = "publish"
 	ReleaseActionWithdraw ReleaseAction = "withdraw"
+	ReleaseActionAbandon  ReleaseAction = "abandon"
 )
 
 // ReleaseRecord preserves a publish or withdrawal transition.

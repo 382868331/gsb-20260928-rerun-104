@@ -50,15 +50,18 @@ type Condition struct {
 type Rule struct {
 	ID          string
 	Description string
-	Priority    int
-	Condition   *Condition
-	Effect      Effect
+	// Group names the independently judged rule group. Empty means DefaultGroup.
+	Group     string
+	Priority  int
+	Condition *Condition
+	Effect    Effect
 }
 
 // RuleSnapshot is an immutable copy exposed in decision evidence.
 type RuleSnapshot struct {
 	ID          string
 	Description string
+	Group       string
 	Priority    int
 	PublicOrder int
 	Effect      Effect
@@ -72,23 +75,30 @@ type Evidence struct {
 
 // Decision is the result of one admission evaluation against one immutable set.
 type Decision struct {
-	Allowed  bool
-	Effect   Effect
-	Version  int
-	Matched  bool
-	Evidence *Evidence
+	Allowed        bool
+	Effect         Effect
+	Version        int
+	Matched        bool
+	Evidence       *Evidence
+	Status         DecisionStatus
+	Contributions  []GroupContribution
+	UnknownReasons []string
 }
 
 type compiledRule struct {
 	rule  Rule
 	order int
+	group string
 }
 
 // RuleSet is an immutable, validated collection of rules.
 type RuleSet struct {
-	version int
-	rules   []compiledRule
-	byID    map[string]compiledRule
+	version       int
+	rules         []compiledRule
+	byID          map[string]compiledRule
+	groups        map[string]groupDefinition
+	groupOrder    []string
+	groupPriority map[string]int
 }
 
 // Engine is safe for concurrent evaluations and rule-set replacement.
@@ -151,34 +161,15 @@ func (e *Engine) LoadSet(set *RuleSet) error {
 func (e *Engine) Evaluate(request map[string]any) Decision {
 	set := e.current.Load()
 	if set == nil {
-		return Decision{Allowed: false, Effect: EffectDeny, Version: 0}
+		return Decision{Allowed: false, Effect: EffectDeny, Version: 0, Status: StatusIndeterminate}
 	}
 	return set.Evaluate(request)
 }
 
-// Evaluate evaluates the immutable rule set. Repeated calls do not see later swaps.
+// Evaluate evaluates the immutable rule set. The request attributes are copied
+// defensively, so later caller mutation cannot change the published judgment.
 func (s *RuleSet) Evaluate(request map[string]any) Decision {
-	result := Decision{Allowed: false, Effect: EffectDeny, Version: s.version}
-	for _, candidate := range s.rules {
-		matched, explanation, ok := evaluateCondition(candidate.rule.Condition, request, s, map[string]bool{})
-		if ok && matched {
-			result.Effect = candidate.rule.Effect
-			result.Allowed = candidate.rule.Effect == EffectAllow
-			result.Matched = true
-			result.Evidence = &Evidence{
-				Rule: RuleSnapshot{
-					ID:          candidate.rule.ID,
-					Description: candidate.rule.Description,
-					Priority:    candidate.rule.Priority,
-					PublicOrder: candidate.order,
-					Effect:      candidate.rule.Effect,
-				},
-				Explanation: explanation,
-			}
-			return result
-		}
-	}
-	return result
+	return s.evaluateGroups(cloneRequest(request))
 }
 
 // Version returns the compiled set's version.
@@ -186,13 +177,20 @@ func (s *RuleSet) Version() int { return s.version }
 
 // CompileRules validates a complete rule batch and returns an immutable set.
 func CompileRules(version int, rules []Rule) (*RuleSet, error) {
+	return compile(version, nil, rules)
+}
+
+func compile(version int, groups []RuleGroup, rules []Rule) (*RuleSet, error) {
 	if len(rules) == 0 {
 		return nil, fmt.Errorf("rule batch is empty")
 	}
 
+	groupDefs, groupProblems := validateGroups(groups)
+
 	compiled := make([]compiledRule, 0, len(rules))
 	byID := make(map[string]compiledRule, len(rules))
-	var problems []string
+	problems := append([]string{}, groupProblems...)
+	implicitGroups := map[string]bool{}
 
 	for index, rule := range rules {
 		rule = cloneRule(rule)
@@ -209,10 +207,28 @@ func CompileRules(version int, rules []Rule) (*RuleSet, error) {
 		if err := validateCondition(rule.Condition, map[string]bool{}); err != nil {
 			problems = append(problems, fmt.Sprintf("rule %q: %v", rule.ID, err))
 		}
-		entry := compiledRule{rule: rule, order: index}
+		groupID := strings.TrimSpace(rule.Group)
+		if groupID == "" {
+			groupID = DefaultGroup
+		}
+		rule.Group = groupID
+		if _, exists := groupDefs[groupID]; !exists {
+			if len(groups) == 0 {
+				implicitGroups[groupID] = true
+			}
+		}
+		entry := compiledRule{rule: rule, order: index, group: groupID}
 		compiled = append(compiled, entry)
 		if _, exists := byID[rule.ID]; !exists {
 			byID[rule.ID] = entry
+		}
+	}
+
+	if len(groups) > 0 {
+		for _, entry := range compiled {
+			if _, exists := groupDefs[entry.group]; !exists {
+				problems = append(problems, fmt.Sprintf("rule %q: unknown group %q", entry.rule.ID, entry.group))
+			}
 		}
 	}
 
@@ -260,6 +276,18 @@ func CompileRules(version int, rules []Rule) (*RuleSet, error) {
 		return nil, fmt.Errorf("invalid rule batch:\n - %s", strings.Join(problems, "\n - "))
 	}
 
+	extra := make([]string, 0, len(implicitGroups))
+	for id := range implicitGroups {
+		extra = append(extra, id)
+	}
+	groupOrder := orderedGroupIDs(groupDefs, extra)
+	groupPriority := make(map[string]int, len(groupOrder))
+	for _, id := range groupOrder {
+		if definition, ok := groupDefs[id]; ok {
+			groupPriority[id] = definition.group.Priority
+		}
+	}
+
 	sort.SliceStable(compiled, func(i, j int) bool {
 		if compiled[i].rule.Priority != compiled[j].rule.Priority {
 			return compiled[i].rule.Priority > compiled[j].rule.Priority
@@ -267,7 +295,25 @@ func CompileRules(version int, rules []Rule) (*RuleSet, error) {
 		return compiled[i].order < compiled[j].order
 	})
 
-	return &RuleSet{version: version, rules: compiled, byID: byID}, nil
+	return &RuleSet{
+		version:       version,
+		rules:         compiled,
+		byID:          byID,
+		groups:        groupDefs,
+		groupOrder:    groupOrder,
+		groupPriority: groupPriority,
+	}, nil
+}
+
+func cloneRequest(request map[string]any) map[string]any {
+	if request == nil {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(request))
+	for key, value := range request {
+		cloned[key] = cloneValue(value)
+	}
+	return cloned
 }
 
 func reverseStrings(values []string) []string {

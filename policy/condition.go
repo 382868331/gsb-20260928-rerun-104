@@ -10,9 +10,18 @@ type tribool struct {
 	value        bool
 	know         bool
 	explanations []string
+	reasons      []string
 }
 
-func unknownTri() tribool { return tribool{} }
+func unknownTri(reasons ...string) tribool { return tribool{reasons: reasons} }
+
+func prefixReasons(prefix string, reasons []string) []string {
+	result := make([]string, len(reasons))
+	for index, reason := range reasons {
+		result[index] = prefix + reason
+	}
+	return result
+}
 
 func knownTri(value bool, explanations ...string) tribool {
 	return tribool{value: value, know: true, explanations: explanations}
@@ -30,21 +39,25 @@ func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, act
 
 	if condition.Ref != "" {
 		if active[condition.Ref] {
-			return unknownTri()
+			return unknownTri(fmt.Sprintf("reference cycle at %q", condition.Ref))
 		}
 		referenced, exists := set.byID[condition.Ref]
 		if !exists {
-			return unknownTri()
+			return unknownTri(fmt.Sprintf("referenced rule %q is unavailable", condition.Ref))
 		}
 		active[condition.Ref] = true
 		defer delete(active, condition.Ref)
-		return evaluateTri(referenced.rule.Condition, request, set, active)
+		result := evaluateTri(referenced.rule.Condition, request, set, active)
+		if !result.know {
+			return unknownTri(prefixReasons(fmt.Sprintf("ref %q: ", condition.Ref), result.reasons)...)
+		}
+		return result
 	}
 
 	if condition.Not != nil {
 		result := evaluateTri(condition.Not, request, set, active)
 		if !result.know {
-			return unknownTri()
+			return unknownTri(prefixReasons("not ", result.reasons)...)
 		}
 		return knownTri(!result.value, append([]string{"not ("}, result.explanations...)...)
 	}
@@ -52,10 +65,12 @@ func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, act
 	if len(condition.All) > 0 {
 		sawUnknown := false
 		var explanations []string
+		var reasons []string
 		for _, child := range condition.All {
 			result := evaluateTri(child, request, set, active)
 			if !result.know {
 				sawUnknown = true
+				reasons = append(reasons, result.reasons...)
 				continue
 			}
 			if !result.value {
@@ -64,17 +79,19 @@ func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, act
 			explanations = append(explanations, result.explanations...)
 		}
 		if sawUnknown {
-			return unknownTri()
+			return unknownTri(reasons...)
 		}
 		return knownTri(true, explanations...)
 	}
 
 	if len(condition.Any) > 0 {
 		sawUnknown := false
+		var reasons []string
 		for _, child := range condition.Any {
 			result := evaluateTri(child, request, set, active)
 			if !result.know {
 				sawUnknown = true
+				reasons = append(reasons, result.reasons...)
 				continue
 			}
 			if result.value {
@@ -82,7 +99,7 @@ func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, act
 			}
 		}
 		if sawUnknown {
-			return unknownTri()
+			return unknownTri(reasons...)
 		}
 		return knownTri(false)
 	}
@@ -96,7 +113,7 @@ func evaluateAtomic(condition *Condition, request map[string]any) tribool {
 		return knownTri(exists, fmt.Sprintf("field %q exists = %t", condition.Field, exists))
 	}
 	if !exists {
-		return unknownTri()
+		return unknownTri(fmt.Sprintf("field %q is missing", condition.Field))
 	}
 
 	switch condition.Op {
@@ -107,7 +124,7 @@ func evaluateAtomic(condition *Condition, request map[string]any) tribool {
 	case OpIn:
 		members, ok := condition.Value.([]any)
 		if !ok {
-			return unknownTri()
+			return unknownTri(fmt.Sprintf("field %q: operator %s requires a []any member list", condition.Field, OpIn))
 		}
 		for _, member := range members {
 			if valuesEqual(value, member) {
@@ -119,7 +136,7 @@ func evaluateAtomic(condition *Condition, request map[string]any) tribool {
 		left, leftOK := value.(string)
 		right, rightOK := condition.Value.(string)
 		if !leftOK || !rightOK {
-			return unknownTri()
+			return unknownTri(fmt.Sprintf("field %q: operator %s requires strings on both sides", condition.Field, condition.Op))
 		}
 		matched := false
 		switch condition.Op {
@@ -135,7 +152,7 @@ func evaluateAtomic(condition *Condition, request map[string]any) tribool {
 
 	comparison, ok := compareValues(value, condition.Value)
 	if !ok {
-		return unknownTri()
+		return unknownTri(fmt.Sprintf("field %q: %v is not comparable with %v", condition.Field, value, condition.Value))
 	}
 	matched := false
 	switch condition.Op {
@@ -148,7 +165,7 @@ func evaluateAtomic(condition *Condition, request map[string]any) tribool {
 	case OpAtMost:
 		matched = comparison <= 0
 	default:
-		return unknownTri()
+		return unknownTri(fmt.Sprintf("field %q: unsupported operator %q", condition.Field, condition.Op))
 	}
 	return boolTri(matched, condition, value)
 }

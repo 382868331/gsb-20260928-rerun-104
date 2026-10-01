@@ -38,6 +38,10 @@ type RequestImpact struct {
 	After   Decision
 	Changed bool
 	Causes  []ImpactCause
+	// FocusGroup is non-empty for single-group rehearsals.
+	FocusGroup  string
+	BeforeGroup GroupContribution
+	AfterGroup  GroupContribution
 }
 
 // ImpactReport is a complete candidate rehearsal against saved requests.
@@ -46,6 +50,7 @@ type ImpactReport struct {
 	CandidateVersion int
 	Requests         []RequestImpact
 	ChangedRequests  int
+	FocusGroup       string
 }
 
 // PreviewRules compiles a candidate without activating it and rehearses requests.
@@ -64,8 +69,59 @@ func (e *Engine) PreviewRules(rules []Rule, requests []SavedRequest) (*ImpactRep
 	return PreviewSets(base, candidate, requests), nil
 }
 
+// PreviewRuleGroups rehearses a complete multi-group candidate batch.
+func (e *Engine) PreviewRuleGroups(groups []RuleGroup, rules []Rule, requests []SavedRequest) (*ImpactReport, error) {
+	e.mu.Lock()
+	candidateVersion := e.nextVersionLocked()
+	e.mu.Unlock()
+	candidate, err := CompileRuleGroups(candidateVersion, groups, rules)
+	if err != nil {
+		return nil, err
+	}
+	var base *RuleSet
+	if active := e.ActiveSet(); active != nil {
+		base = active
+	}
+	return previewSets(base, candidate, requests, ""), nil
+}
+
+// PreviewGroupAdjustment rehearses changing only one group. rules must contain
+// the full candidate batch (only the named group's rules are expected to
+// change); the report surfaces that group's contribution on both sides.
+func (e *Engine) PreviewGroupAdjustment(groups []RuleGroup, rules []Rule, group string, requests []SavedRequest) (*ImpactReport, error) {
+	e.mu.Lock()
+	candidateVersion := e.nextVersionLocked()
+	e.mu.Unlock()
+	candidate, err := CompileRuleGroups(candidateVersion, groups, rules)
+	if err != nil {
+		return nil, err
+	}
+	if group == "" {
+		group = DefaultGroup
+	}
+	if _, ok := candidate.groups[group]; group != DefaultGroup && !ok {
+		return nil, fmt.Errorf("focused group %q is not part of the candidate", group)
+	}
+	var base *RuleSet
+	if active := e.ActiveSet(); active != nil {
+		base = active
+	}
+	return previewSets(base, candidate, requests, group), nil
+}
+
 // PreviewSets compares two immutable rule sets without changing an engine.
 func PreviewSets(base, candidate *RuleSet, requests []SavedRequest) *ImpactReport {
+	return previewSets(base, candidate, requests, "")
+}
+
+// PreviewGroupSets rehearses a candidate where only one rule group changed. The
+// report keeps each group's independent contribution on both sides so users can
+// see the effect of adjusting just that group.
+func PreviewGroupSets(base, candidate *RuleSet, group string, requests []SavedRequest) *ImpactReport {
+	return previewSets(base, candidate, requests, group)
+}
+
+func previewSets(base, candidate *RuleSet, requests []SavedRequest, focusGroup string) *ImpactReport {
 	report := &ImpactReport{}
 	if base != nil {
 		report.BaseVersion = base.version
@@ -73,22 +129,85 @@ func PreviewSets(base, candidate *RuleSet, requests []SavedRequest) *ImpactRepor
 	if candidate != nil {
 		report.CandidateVersion = candidate.version
 	}
+	report.FocusGroup = focusGroup
 	for _, saved := range requests {
-		impact := RequestImpact{Request: saved}
+		saved.Attributes = cloneRequest(saved.Attributes)
+		impact := RequestImpact{Request: saved, FocusGroup: focusGroup}
 		if base != nil {
 			impact.Before = base.Evaluate(saved.Attributes)
+			if focusGroup != "" {
+				impact.BeforeGroup = base.groupOutcome(focusGroup, saved.Attributes)
+			}
 		}
 		if candidate != nil {
 			impact.After = candidate.Evaluate(saved.Attributes)
+			if focusGroup != "" {
+				impact.AfterGroup = candidate.groupOutcome(focusGroup, saved.Attributes)
+			}
 		}
-		impact.Changed = !decisionsEquivalent(impact.Before, impact.After)
+		if focusGroup != "" {
+			impact.Changed = groupOutcomesDiffer(impact.BeforeGroup, impact.AfterGroup) ||
+				!decisionsEquivalent(impact.Before, impact.After)
+		} else {
+			impact.Changed = !decisionsEquivalent(impact.Before, impact.After)
+		}
 		if impact.Changed {
 			report.ChangedRequests++
 		}
-		impact.Causes = attributeImpact(saved.Attributes, base, candidate, impact)
+		if focusGroup != "" {
+			impact.Causes = attributeGroupImpact(base, candidate, impact)
+		} else {
+			impact.Causes = attributeImpact(saved.Attributes, base, candidate, impact)
+		}
 		report.Requests = append(report.Requests, impact)
 	}
 	return report
+}
+
+func groupOutcomesDiffer(before, after GroupContribution) bool {
+	return before.Outcome != after.Outcome || before.MatchedRuleID != after.MatchedRuleID ||
+		!reflect.DeepEqual(before.UnknownReasons, after.UnknownReasons)
+}
+
+func attributeGroupImpact(base, candidate *RuleSet, impact RequestImpact) []ImpactCause {
+	before, after := impact.BeforeGroup, impact.AfterGroup
+	if before.Outcome == after.Outcome && before.MatchedRuleID == after.MatchedRuleID {
+		if reflect.DeepEqual(before.UnknownReasons, after.UnknownReasons) {
+			return nil
+		}
+		ruleID := after.MatchedRuleID
+		if ruleID == "" {
+			ruleID = before.MatchedRuleID
+		}
+		return []ImpactCause{{Kind: ChangeConditionModified, RuleID: ruleID,
+			Message: fmt.Sprintf("group %q unknown reasons changed", impact.FocusGroup)}}
+	}
+	if before.MatchedRuleID != "" && after.MatchedRuleID == "" {
+		oldRule, oldOK := ruleFromSet(base, before.MatchedRuleID)
+		newRule, newOK := ruleFromSet(candidate, before.MatchedRuleID)
+		if oldOK && newOK && !reflect.DeepEqual(oldRule.rule.Condition, newRule.rule.Condition) {
+			return []ImpactCause{{Kind: ChangeConditionModified, RuleID: before.MatchedRuleID,
+				Message: fmt.Sprintf("group %q rule %q condition changed (now %s)", impact.FocusGroup, before.MatchedRuleID, after.Outcome)}}
+		}
+		return []ImpactCause{{Kind: ChangeConditionRemoved, RuleID: before.MatchedRuleID,
+			Message: fmt.Sprintf("group %q no longer matches rule %q (now %s)", impact.FocusGroup, before.MatchedRuleID, after.Outcome)}}
+	}
+	if before.MatchedRuleID != after.MatchedRuleID && after.MatchedRuleID != "" {
+		oldRule, oldOK := ruleFromSet(base, after.MatchedRuleID)
+		newRule, newOK := ruleFromSet(candidate, after.MatchedRuleID)
+		if !oldOK && newOK {
+			return []ImpactCause{{Kind: ChangeConditionAdded, RuleID: after.MatchedRuleID,
+				Message: fmt.Sprintf("group %q added matching rule %q", impact.FocusGroup, after.MatchedRuleID)}}
+		}
+		if oldOK && newOK && !reflect.DeepEqual(oldRule.rule.Condition, newRule.rule.Condition) {
+			return []ImpactCause{{Kind: ChangeConditionModified, RuleID: after.MatchedRuleID,
+				Message: fmt.Sprintf("group %q rule %q condition changed", impact.FocusGroup, after.MatchedRuleID)}}
+		}
+		return []ImpactCause{{Kind: ChangePriorityModified, RuleID: after.MatchedRuleID,
+			Message: fmt.Sprintf("group %q verdict became %s via rule %q", impact.FocusGroup, after.Outcome, after.MatchedRuleID)}}
+	}
+	return []ImpactCause{{Kind: ChangeConditionModified, RuleID: "",
+		Message: fmt.Sprintf("group %q outcome changed from %s to %s", impact.FocusGroup, before.Outcome, after.Outcome)}}
 }
 
 func decisionsEquivalent(left, right Decision) bool {
