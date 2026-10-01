@@ -18,12 +18,12 @@ func knownTri(value bool, explanations ...string) tribool {
 	return tribool{value: value, know: true, explanations: explanations}
 }
 
-func evaluateCondition(condition *Condition, request map[string]any, set *RuleSet, active map[string]bool) (bool, []string, bool) {
-	result := evaluateTri(condition, request, set, active)
+func evaluateConditionInGroup(condition *Condition, request map[string]any, group compiledGroup, active map[string]bool) (bool, []string, bool) {
+	result := evaluateTriInGroup(condition, request, group, active)
 	return result.value, result.explanations, result.know
 }
 
-func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, active map[string]bool) tribool {
+func evaluateTriInGroup(condition *Condition, request map[string]any, group compiledGroup, active map[string]bool) tribool {
 	if condition == nil {
 		return unknownTri()
 	}
@@ -32,17 +32,17 @@ func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, act
 		if active[condition.Ref] {
 			return unknownTri()
 		}
-		referenced, exists := set.byID[condition.Ref]
+		referenced, exists := group.byID[condition.Ref]
 		if !exists {
 			return unknownTri()
 		}
 		active[condition.Ref] = true
 		defer delete(active, condition.Ref)
-		return evaluateTri(referenced.rule.Condition, request, set, active)
+		return evaluateTriInGroup(referenced.rule.Condition, request, group, active)
 	}
 
 	if condition.Not != nil {
-		result := evaluateTri(condition.Not, request, set, active)
+		result := evaluateTriInGroup(condition.Not, request, group, active)
 		if !result.know {
 			return unknownTri()
 		}
@@ -53,7 +53,7 @@ func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, act
 		sawUnknown := false
 		var explanations []string
 		for _, child := range condition.All {
-			result := evaluateTri(child, request, set, active)
+			result := evaluateTriInGroup(child, request, group, active)
 			if !result.know {
 				sawUnknown = true
 				continue
@@ -72,7 +72,7 @@ func evaluateTri(condition *Condition, request map[string]any, set *RuleSet, act
 	if len(condition.Any) > 0 {
 		sawUnknown := false
 		for _, child := range condition.Any {
-			result := evaluateTri(child, request, set, active)
+			result := evaluateTriInGroup(child, request, group, active)
 			if !result.know {
 				sawUnknown = true
 				continue
