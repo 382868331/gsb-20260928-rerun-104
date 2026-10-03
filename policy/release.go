@@ -18,6 +18,7 @@ type ReleaseRecord struct {
 	Version  int
 	Previous int
 	Reason   string
+	Basis    *ObservationBasis
 }
 
 // PublishRules validates a candidate, publishes it atomically, and records the change.
@@ -40,6 +41,7 @@ func (e *Engine) PublishRules(rules []Rule) (*RuleSet, error) {
 		Previous: setVersion(current),
 		Reason:   "published candidate",
 	})
+	e.refreshObservations(changedGroupIDs(current, set))
 	return set, nil
 }
 
@@ -72,6 +74,7 @@ func (e *Engine) WithdrawRules() (*RuleSet, error) {
 		Previous: current.version,
 		Reason:   "withdrew active publication",
 	})
+	e.refreshObservations(changedGroupIDs(current, previous))
 	return previous, nil
 }
 

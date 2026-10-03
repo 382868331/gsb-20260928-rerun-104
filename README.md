@@ -42,6 +42,15 @@
 
 `PublishRules` 在候选验证通过后原子发布并追加 `ReleaseRecord`。已经开始的判断应持有 `ActiveSet()` 返回的快照；发布后该快照仍按旧版本执行，直到业务流程显式重新取快照。`WithdrawRules` 会恢复当前发布记录中的上一版，同时保留发布与撤回记录；撤回后再次发布使用新的单调版本号。
 
+## 候选观察期
+
+正式发布前，可以让候选规则以影子方式观察真实请求的副本：`StartObservation(id, groups)` 注册候选（未覆盖的组复用当前正式版本并记为依赖），之后每次 `Observe(request)` 用同一请求分别评测当前规则与候选规则，**只有当前规则的结论负责实际裁决**，候选的允许结论绝不触发业务效果。每条 `ObservationRecord` 保留请求当时可用的属性副本、双方各组贡献（`Decision.Contributions`）、差异归因，并把差异区分为 `verdict_change`（明确的允许/拒绝翻转）与 `unknown_change`（缺失/不可用属性带来的变化）。
+
+观察期间仍可正常调整其他规则组：任何发布或撤回都会把候选依赖组发生变化的既有观察记录标记为过期（`Stale` 及原因），候选影子集随后基于新的正式版本重编译继续观察。`PublishCandidate` 只依据未过期的记录，全部过期时拒绝发布；发布记录的 `ReleaseRecord.Basis` 完整记载依据范围（序列区间、覆盖的正式版本、剔除的过期条数）。
+
+`CompareCandidates(a, b)` 在两个候选各自记录的历史请求上重放并对比两者表现；`AbandonCandidate` 放弃候选后仍可用 `ExplainCandidate` 解释其曾经的差异；`ExportObservation`/`ResumeObservation` 支持重开后接续观察，序列号连续，发布时依据范围完整。
+
+
 ## 使用示例
 
 ```go

@@ -138,6 +138,10 @@ type Engine struct {
 	current atomic.Pointer[RuleSet]
 	mu      sync.Mutex
 	history []ReleaseRecord
+
+	obsMu      sync.Mutex
+	candidates map[string]*observedCandidate
+	obsSeq     int
 }
 
 // NewEngine creates an engine. rules are validated before becoming active.

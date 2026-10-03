@@ -35,6 +35,7 @@ func (e *Engine) PublishGroups(groups []RuleGroup) (*RuleSet, error) {
 		Previous: setVersion(current),
 		Reason:   "published candidate groups",
 	})
+	e.refreshObservations(changedGroupIDs(current, set))
 	return set, nil
 }
 
@@ -84,6 +85,7 @@ func (e *Engine) PublishGroup(groupID string, rules []Rule) (*RuleSet, error) {
 		Previous: current.version,
 		Reason:   fmt.Sprintf("published single group %q", groupID),
 	})
+	e.refreshObservations(changedGroupIDs(current, candidate))
 	return candidate, nil
 }
 
