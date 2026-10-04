@@ -18,6 +18,9 @@ type ReleaseRecord struct {
 	Version  int
 	Previous int
 	Reason   string
+	// Basis, set when the release promotes an observing candidate, documents
+	// the actual range of fresh observations the release relied on.
+	Basis *ObservationBasis
 }
 
 // PublishRules validates a candidate, publishes it atomically, and records the change.

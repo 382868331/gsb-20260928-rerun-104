@@ -42,6 +42,56 @@
 
 `PublishRules` 在候选验证通过后原子发布并追加 `ReleaseRecord`。已经开始的判断应持有 `ActiveSet()` 返回的快照；发布后该快照仍按旧版本执行，直到业务流程显式重新取快照。`WithdrawRules` 会恢复当前发布记录中的上一版，同时保留发布与撤回记录；撤回后再次发布使用新的单调版本号。
 
+## 候选观察期
+
+`PreviewRules` 适合一次性离线双跑；当维护者需要在**真实流量副本**上长期核对新旧规则、而又完全不影响业务裁决时，使用候选观察期：
+
+- `OpenCandidate(id, groups)` / `OpenCandidateGroup(id, groupID, rules)` 校验并登记一个候选规则集；观察期内当前规则照常裁决，候选规则只做影子计算。
+- `Observe(candidateID, request)` 对同一请求同时记录当前规则与候选规则的 `Decision` 与各自的规则组贡献（`GroupContribution`）。**只有返回的当前规则结论可用于业务裁决**，候选结论仅作为观察证据。请求属性在记录时深拷贝，调用方事后修改入参或导出的记录都不能改写历史。
+- `Observations(candidateID)` / `Observation(...)` 只读导出冻结记录；查询和导出永远不会反过来修改记录。
+- 观察期间其他独立规则组仍可通过 `PublishGroups`/`PublishGroup` 调整。一旦某条观察所依赖的正式规则组在记录后发生变化，该记录会被标记 `Stale=true` 并列出 `ChangedDependencies`；记录里的历史结论保持原值不变。`PublishCandidate` 会拒绝任何带过期记录的发布——**不能以过期结论直接发布**，需要在新正式版本上补采新鲜观察。
+- `CompareCandidates(candidateA, candidateB, requests)` 让两个候选在同一批历史请求上对照（不传请求时使用两个候选共同观察过的请求）。差异分两类：`explicit_change`（双方都有明确裁决但结论不同，`ExplicitDenyChanged` 标明是否包含明确拒绝）与 `unknown_change`（至少一方因信息未知而无明确裁决），不会把“信息未知”混同为“明确拒绝变化”。
+- `AbandonCandidate(id, reason)` 放弃候选但保留全部观察与放弃理由；`ReopenCandidate(id)` 重开后沿用已确认的观察和放弃历史；同 ID 但内容不同的重新定义会被拒绝。
+- `PublishCandidate(id)` 只在没有过期记录时发布，并在发布记录 `ReleaseRecord.Basis` 中说明实际采用的依据范围：采用了哪些观察/请求、覆盖的正式版本区间、以及之前保留的放弃说明。
+
+```go
+id := "risk-low-deny"
+if _, err := engine.OpenCandidateGroup(id, "risk", candidateRiskRules); err != nil {
+	return err
+}
+
+// 在真实处理路径上：formal 是唯一用于业务裁决的结论。
+formal, observation, err := engine.Observe(id, policy.SavedRequest{
+	ID:         traceID,
+	Attributes: attributes,
+})
+if err != nil {
+	return err
+}
+if !formal.Allowed {
+	return fmt.Errorf("denied by %s", formal.Evidence.Rule.ID)
+}
+_ = observation // 候选侧结论只做核对，不参与放行或拒绝
+
+// 另一个组在观察期间照常调整；受影响的旧观察会自动带上 Stale 标记。
+comparison, err := engine.CompareCandidates("candidate-a", "candidate-b", nil)
+if err != nil {
+	return err
+}
+_ = comparison
+
+// 放弃后理由保留；重开沿用既有观察。
+_ = engine.AbandonCandidate(id, "缺少边界用例覆盖")
+_, _ = engine.ReopenCandidate(id)
+
+// 没有过期记录才能发布，发布记录会带上 Basis。
+if _, basis, err := engine.PublishCandidate(id); err != nil {
+	return err
+} else {
+	log.Print(basis.Summary)
+}
+```
+
 ## 使用示例
 
 ```go
