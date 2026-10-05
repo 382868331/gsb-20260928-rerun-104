@@ -72,6 +72,16 @@ if _, err := engine.PublishObservation("cand-1"); err != nil {
 
 ## 使用示例
 
+## 限定范围发布
+
+观察期之外，维护者可以为候选批准一份**限定范围**的发布计划（`RolloutPlan`）：按请求属性划定互不混淆的试用群组（`TrialGroups`）、最大业务暴露量（`MaxExposure`）以及必须保留原规则的范围（`ProtectedScopes`）。范围条件只使用原子/组合条件，不允许 `ref`。
+
+- `ComputeRolloutImpact(candidateID)` 先用有效（未过期）观察记录计算哪些请求可能受到明确拒绝变化（`DenyChanges`）或未知属性影响（`UnknownAffected`），再据此批准分组方案。
+- `ApproveRollout(candidateID, plan)` 校验并深拷贝计划；批准后 `Adjudicate(candidateID, requestID, attrs)` 对恰好落入一个试用群组、不触及保护范围且归属可确定的请求由候选裁决，其余请求继续原规则。
+- 同一 `requestID` 重复处理返回已记录的裁决，不增加暴露计数、不改变归属；归属冲突（命中多个群组）或归属未知一律回退原规则且不计暴露。
+- 暴露量耗尽、依赖规则变化（正式发布/撤回、候选更新）或 `WithdrawRollout` 紧急撤回都会停止新的候选采用；已记录的裁决及其当时版本保留并继续对重复请求生效。
+- `RolloutInfo` / `RolloutAssignments` 只返回深拷贝，用于核对真实裁决归属与范围上限。
+
 ```go
 engine, err := policy.NewEngine([]policy.Rule{{
 	ID:       "vip-allow",

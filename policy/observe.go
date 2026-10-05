@@ -39,6 +39,7 @@ type Observation struct {
 	status         ObservationStatus
 	candidate      *RuleSet
 	records        []ObservationRecord
+	rollout        *rollout
 	abandonReason  string
 	abandonedCount int
 }
@@ -246,6 +247,7 @@ func (e *Engine) UpdateObservationCandidate(candidateID string, groups []RuleGro
 	}
 	oldVersion := observation.candidate.version
 	observation.candidate = candidate
+	e.stopRolloutsLocked(fmt.Sprintf("candidate %q rules changed", candidateID))
 	observation.markStaleLocked(func(record *ObservationRecord) bool {
 		return record.CandidateVersion != candidate.version
 	}, fmt.Sprintf("candidate rules changed from version %d to %d", oldVersion, candidate.version))
@@ -408,6 +410,7 @@ func (e *Engine) activeObservationLocked(candidateID string) (*Observation, erro
 // It runs at mutation time (publish/withdraw/candidate update), never lazily
 // at query time, so reading records cannot rewrite history.
 func (e *Engine) markObservationsStaleLocked(newBaseVersion int, reason string) {
+	e.stopRolloutsLocked(reason)
 	for _, observation := range e.observations {
 		if observation.status == ObservationPublished {
 			continue
