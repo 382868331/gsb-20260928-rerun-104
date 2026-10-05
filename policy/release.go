@@ -40,6 +40,7 @@ func (e *Engine) PublishRules(rules []Rule) (*RuleSet, error) {
 		Previous: setVersion(current),
 		Reason:   "published candidate",
 	})
+	e.markObservationsStaleLocked(nextVersion, "formal rule set changed")
 	return set, nil
 }
 
@@ -72,6 +73,7 @@ func (e *Engine) WithdrawRules() (*RuleSet, error) {
 		Previous: current.version,
 		Reason:   "withdrew active publication",
 	})
+	e.markObservationsStaleLocked(previous.version, "formal rule set changed")
 	return previous, nil
 }
 

@@ -135,9 +135,12 @@ type RuleSet struct {
 
 // Engine is safe for concurrent evaluations and rule-set replacement.
 type Engine struct {
-	current atomic.Pointer[RuleSet]
-	mu      sync.Mutex
-	history []ReleaseRecord
+	current      atomic.Pointer[RuleSet]
+	mu           sync.Mutex
+	history      []ReleaseRecord
+	observations map[string]*Observation
+	obsSeq       int64
+	candidateSeq int
 }
 
 // NewEngine creates an engine. rules are validated before becoming active.

@@ -42,6 +42,34 @@
 
 `PublishRules` 在候选验证通过后原子发布并追加 `ReleaseRecord`。已经开始的判断应持有 `ActiveSet()` 返回的快照；发布后该快照仍按旧版本执行，直到业务流程显式重新取快照。`WithdrawRules` 会恢复当前发布记录中的上一版，同时保留发布与撤回记录；撤回后再次发布使用新的单调版本号。
 
+## 候选观察期
+
+`StartObservation(candidateID, groups)` 编译一组候选规则并开始影子观察，不影响业务裁决。之后每个真实请求调用 `Observe(candidateID, requestID, attrs)`：返回的 `Decision` 永远来自当前正式规则（唯一业务裁决），同时把同一请求在当前与候选规则下各自的结论与规则组贡献写入一条 `ObservationRecord`。
+
+- 观察记录在写入时深拷贝请求当时可用的属性与两侧 `Decision`；`ObservationRecords` 只返回深拷贝，查询或导出不会改写历史事实。
+- 观察期间其他规则组仍可正常调整。任何正式发布/撤回（`PublishRules`/`PublishGroups`/`PublishGroup`/`WithdrawRules`）或 `UpdateObservationCandidate` 修改候选本身，都会在变更发生时把依赖已移动的记录标记为 `Stale` 并注明原因；过期记录不能被 `ConfirmObservations` 确认，`PublishObservation` 也拒绝直接采用含过期结论的确认依据。
+- `CompareObservations(a, b)` 把两个候选对齐到双方都观察过的同一批历史请求上，差异分为 `explicit_deny_change`（两侧均有确定结论且至少一侧为明确拒绝）、`explicit_change`（其他确定结论差异）与 `unknown_difference`（至少一侧因信息不足未知）。
+- `AbandonObservation(candidateID, reason)` 放弃候选但保留全部记录与放弃理由；`ResumeObservation` 重开后沿用已确认的观察与放弃状态，已标记过期的记录保持过期。
+- `PublishObservation(candidateID)` 要求至少一条已确认且未过期的观察，发布记录说明实际采用的依据范围（确认记录数与其对应的基线版本）。
+
+```go
+if err := engine.StartObservation("cand-1", candidateGroups); err != nil {
+	return err
+}
+decision, err := engine.Observe("cand-1", requestID, attrs) // decision 仍由当前规则裁决
+if err != nil {
+	return err
+}
+records, _ := engine.ObservationRecords("cand-1")
+comparison, _ := engine.CompareObservations("cand-1", "cand-2")
+if err := engine.ConfirmObservations("cand-1"); err != nil {
+	return err
+}
+if _, err := engine.PublishObservation("cand-1"); err != nil {
+	return err
+}
+```
+
 ## 使用示例
 
 ```go
