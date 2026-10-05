@@ -135,6 +135,34 @@ history := engine.History()
 
 也可以直接调用 `engine.ReplaceRules(rules)`，该方法内部执行相同的“先验证、后原子切换”流程。
 
+## 候选限定范围发布
+
+观察期之外，维护者可以把候选规则的生效范围限定在一部分请求上：按请求属性划分**互不混淆的试用群组**、约定**最大业务暴露量**（候选可裁决的不同请求数上限），并声明**必须保留原规则的范围**。
+
+- `PlanScopedRollout(spec)` 只用已确认且未过期的观察记录计算分组方案：哪些请求会落入某个试用群组、哪些命中保留范围、哪些同时匹配多个群组（冲突，必须留在原规则），并标出可能受到拒绝变化（`explicit_deny_change`）或未知属性影响（`unknown_difference`）的请求。方案计算后仍需 `ApproveScopedRollout(candidateID)` 明确批准，候选才开始裁决。
+- `Adjudicate(candidateID, requestID, attrs)`：只有已批准、恰好落入一个试用群组、未命中保留范围且暴露量未耗尽的请求才由候选裁决，其余请求继续由原规则裁决。群组条件因缺失属性而未知时不算命中。同一 `requestID` 重复处理返回首次的归属与裁决，不增加暴露计数。
+- 正式发布/撤回任何规则组、更新候选规则，或暴露量耗尽，都会停止新的候选采用；`WithdrawRollout(candidateID, reason)` 用于紧急撤回。已经作出的裁决连同当时的基线版本与候选版本保留在 `RolloutRecords` 中，重放同一请求仍得到当时的裁决。
+
+```go
+plan, err := engine.PlanScopedRollout(policy.ScopedRolloutSpec{
+	CandidateID: "cand-1",
+	Groups: []policy.TrialGroup{
+		{ID: "beta", Condition: &policy.Condition{Field: "segment", Op: policy.OpEqual, Value: "beta"}},
+	},
+	Reserved: []policy.TrialGroup{
+		{ID: "payments", Condition: &policy.Condition{Field: "channel", Op: policy.OpEqual, Value: "payment"}},
+	},
+	MaxExposure: 100,
+})
+if err != nil {
+	return err
+}
+if err := engine.ApproveScopedRollout("cand-1"); err != nil {
+	return err
+}
+decision, err := engine.Adjudicate("cand-1", requestID, attrs)
+```
+
 ## 验证
 
 ```sh

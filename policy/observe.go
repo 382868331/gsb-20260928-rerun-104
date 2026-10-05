@@ -249,6 +249,9 @@ func (e *Engine) UpdateObservationCandidate(candidateID string, groups []RuleGro
 	observation.markStaleLocked(func(record *ObservationRecord) bool {
 		return record.CandidateVersion != candidate.version
 	}, fmt.Sprintf("candidate rules changed from version %d to %d", oldVersion, candidate.version))
+	if rollout, ok := e.rollouts[candidateID]; ok {
+		rollout.haltLocked(fmt.Sprintf("candidate rules changed from version %d to %d", oldVersion, candidate.version))
+	}
 	return nil
 }
 
@@ -416,6 +419,7 @@ func (e *Engine) markObservationsStaleLocked(newBaseVersion int, reason string) 
 			return record.BaseVersion != newBaseVersion
 		}, fmt.Sprintf("%s: base version moved to %d", reason, newBaseVersion))
 	}
+	e.haltRolloutsLocked(fmt.Sprintf("%s: base version moved to %d", reason, newBaseVersion))
 }
 
 func (o *Observation) markStaleLocked(stale func(*ObservationRecord) bool, reason string) {

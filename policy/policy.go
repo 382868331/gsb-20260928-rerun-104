@@ -139,6 +139,7 @@ type Engine struct {
 	mu           sync.Mutex
 	history      []ReleaseRecord
 	observations map[string]*Observation
+	rollouts     map[string]*Rollout
 	obsSeq       int64
 	candidateSeq int
 }
